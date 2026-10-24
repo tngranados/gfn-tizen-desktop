@@ -1,5 +1,5 @@
 /*
- * gfn-tizen-desktop v0.3.1 — TizenBrew "mods" module (MIT)
+ * gfn-tizen-desktop v0.3.2-gfn — TizenBrew "mods" module (MIT)
  *
  * Runs the GeForce NOW web client (play.geforcenow.com) on a Samsung Tizen TV
  * while presenting itself as Chrome on Windows. The on-screen diagnostics
@@ -35,7 +35,7 @@
 
   /* ================================================================ config */
 
-  var VERSION = '0.3.1';
+  var VERSION = '0.3.2-gfn';
   var GFN_HOST = 'play.geforcenow.com';
   var GFN_APP_PATH = '/mall/';        // where GFN's index.html is served
   var BOOT_PATH = '/robots.txt';      // small text file on the GFN origin
@@ -58,7 +58,13 @@
       preferred: ['H265', 'AV1'],     // first codec the TV's WebRTC offers wins
       overrideData: 'force4kbrowser=1'
     },
-    keys: { blue: 406, red: 403, green: 404 }, // ColorF3Blue, ColorF0Red, ColorF1Green
+    keys: { blue: 406, red: 403, green: 404, yellow: 405 }, // ColorF3Blue, ColorF0Red, ColorF1Green, ColorF2Yellow
+    keyboard: {
+      registerFKeys: true,   // ask Tizen to route F1–F12 to the app (the TV may ignore it)
+      captureFKeys: true,    // preventDefault on F1–F12 so TV hotkeys do not fire
+      remap: true,           // Ctrl/Alt + 1..0,-,= -> F1..F12 for games that need them
+      relockOnInput: true    // after Esc releases pointer lock, re-lock on the next key/click
+    },
     unsupportedWatchMs: 90000,        // look for "not supported" on GFN pages this long
     overlay: { autoShowMs: 20000, maxLogLines: 60, shownLogLines: 10 }
   };
@@ -97,6 +103,10 @@
     lastDrag: '', relocksKept: 0, lockChanges: 0,
     lock: '',                        // last pointer lock state / error
     wheel: false, logged: 0          // first few button events are logged verbosely
+  };
+  var keyboard = {
+    last: '', fkeys: 0, remapped: 0, relocks: 0,
+    registerNote: 'inte försökt', pendingRelock: false
   };
   var deviceModes = '';              // SDK's supported stream modes (for 4K diagnosis)
   var overlay = { el: null, visible: false, hideTimer: null, pollTimer: null };
@@ -729,7 +739,139 @@
     trace(e);
   }
 
+  function streamElement() {
+    return streamVideo() || document.querySelector('video');
+  }
+
+  function tryRelock(source) {
+    if (!CONFIG.keyboard.relockOnInput) { return; }
+    var video = streamElement();
+    if (!video) { return; }
+    if (document.pointerLockElement === video) { keyboard.pendingRelock = false; return; }
+    if (!keyboard.pendingRelock && !stream.text) { return; }
+    keyboard.pendingRelock = false;
+
+    function ok() {
+      keyboard.relocks += 1;
+      log('relås via ' + source);
+    }
+    function bad(e) {
+      log('relås avvisad (' + source + '): ' + ((e && e.name) || e));
+    }
+
+    try {
+      var promise = video.requestPointerLock({ unadjustedMovement: true });
+      if (promise && typeof promise.then === 'function') { promise.then(ok, bad); return; }
+      ok();
+      return;
+    } catch (e) {
+      // Older engines reject the options object; retry the plain call.
+    }
+    try {
+      video.requestPointerLock();
+      ok();
+    } catch (e2) {
+      bad(e2);
+    }
+  }
+
+  var FKEY_MAP = {
+    '1': 'F1', '2': 'F2', '3': 'F3', '4': 'F4', '5': 'F5', '6': 'F6',
+    '7': 'F7', '8': 'F8', '9': 'F9', '0': 'F10', '-': 'F11', '=': 'F12'
+  };
+  var fkeyDown = {};  // digit -> F-key currently held, so keyup works after Ctrl is released
+
+  function dispatchFKey(name, type) {
+    var keyCode = 111 + Number(name.slice(1));
+    var event = new KeyboardEvent(type, {
+      key: name, code: name, bubbles: true, cancelable: true
+    });
+    try { Object.defineProperty(event, 'keyCode', { get: function () { return keyCode; } }); } catch (e) { /* ignore */ }
+    try { Object.defineProperty(event, 'which', { get: function () { return keyCode; } }); } catch (e) { /* ignore */ }
+    try { event.__gfnSynthetic = true; } catch (e) { /* ignore */ }
+    (document.activeElement || document.body || document).dispatchEvent(event);
+  }
+
+  function remapFKey(e) {
+    var mapped = FKEY_MAP[e.key];
+    if (!mapped) { return false; }
+
+    // Keyup must be delivered even if Ctrl/Alt was released first, or the game
+    // will think the F-key is stuck down.
+    if (e.type === 'keyup') {
+      if (!fkeyDown[e.key]) { return false; }
+      delete fkeyDown[e.key];
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      dispatchFKey(mapped, 'keyup');
+      return true;
+    }
+
+    if (!CONFIG.keyboard.remap) { return false; }
+    if (!(e.ctrlKey || e.altKey) || e.shiftKey || e.metaKey) { return false; }
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    fkeyDown[e.key] = mapped;
+    dispatchFKey(mapped, 'keydown');
+    keyboard.remapped += 1;
+    if (keyboard.remapped <= 5) {
+      log('F-key omap: ' + (e.ctrlKey ? 'Ctrl' : 'Alt') + '+' + e.key + ' -> ' + mapped);
+    }
+    return true;
+  }
+
+  function registerFKeys() {
+    if (!CONFIG.keyboard.registerFKeys) { keyboard.registerNote = 'av'; return; }
+    var api = (typeof tizen !== 'undefined' && tizen.tvinputdevice) ? tizen.tvinputdevice :
+      (hidden.tizen && hidden.tizen.tvinputdevice ? hidden.tizen.tvinputdevice : null);
+    if (!api) {
+      keyboard.registerNote = 'Tizen input saknas';
+      log('F-tangenter: Tizen input API saknas');
+      return;
+    }
+    var names = [];
+    for (var i = 1; i <= 12; i++) {
+      names.push('F' + i);
+      names.push('KEY_F' + i);
+    }
+    // Individually first: a batch with one invalid name can reject everything.
+    if (typeof api.registerKey === 'function') {
+      var ok = 0;
+      var fail = 0;
+      for (var j = 0; j < names.length; j++) {
+        try { api.registerKey(names[j]); ok++; } catch (e2) { fail++; }
+      }
+      keyboard.registerNote = ok + ' ok / ' + fail + ' fel';
+      log('F-tangenter: registerKey ' + keyboard.registerNote);
+      return;
+    }
+    if (typeof api.registerKeyBatch === 'function') {
+      try {
+        api.registerKeyBatch(names, function () {
+          keyboard.registerNote = 'batch ok';
+          log('F-tangenter: registerKeyBatch ok');
+        }, function (e) {
+          keyboard.registerNote = 'batch fel';
+          log('F-tangenter: registerKeyBatch fel ' + ((e && e.message) || e));
+        });
+        keyboard.registerNote = 'batch ' + names.length;
+      } catch (e) {
+        keyboard.registerNote = 'batch kastade';
+      }
+    } else {
+      keyboard.registerNote = 'ingen registerKey';
+    }
+  }
+
   function installMouseListeners() {
+    window.addEventListener('mousedown', function (e) {
+      if (CONFIG.keyboard.relockOnInput && !document.pointerLockElement) {
+        var video = streamElement();
+        if (video && (keyboard.pendingRelock || e.target === video || (video.contains && video.contains(e.target)))) {
+          tryRelock('click');
+        }
+      }
+    }, true);
     window.addEventListener('mousedown', onMouseDown, true);
     window.addEventListener('mouseup', onMouseUp, true);
     window.addEventListener('mousemove', onMouseMove, true);
@@ -752,6 +894,10 @@
       mouse.lock = 'FEL vid låsning';
       traceNote('LÅSFEL');
       log('pointer lock misslyckades');
+    });
+    window.addEventListener('blur', function () { log('fönstret tappade fokus'); }, true);
+    document.addEventListener('visibilitychange', function () {
+      log('synlighet: ' + (document.hidden ? 'dold' : 'synlig'));
     });
   }
 
@@ -839,14 +985,15 @@
   // Key names without revealing what is typed: characters show as "tecken".
   function keyName(e) {
     var k = e.key;
-    if (k && k.length === 1) { return 'tecken'; }
-    return (k || 'okänd') + ' (' + e.keyCode + ')';
+    var label = (k && k.length === 1) ? 'tecken' : (k || 'okänd');
+    return label + ' code=' + (e.code || '?') + ' keyCode=' + e.keyCode + (e.isTrusted ? '' : ' !');
   }
 
   function diagText() {
     refreshStreamStats();
     var lines = [
-      'GFN Desktop för Tizen v' + VERSION + '   [blå: visa/dölj · röd: 4K-läge · grön: låsvakt]   klocka ' + tzLabel(),
+      'GFN Desktop för Tizen v' + VERSION + '   [blå: visa/dölj · röd: 4K-läge · grön: låsvakt · gul: F-key omap]   klocka ' + tzLabel(),
+      'F-keys:         Ctrl/Alt + 1..0,-,= → F1..F12 · Esc → relås på nästa tangent/click',
       'Sida:           ' + location.host + trunc(location.pathname, 60),
       'Start:          ' + (startNote || ('direkt, injicerad ' + injectedAt.ms + ' ms, ' + injectedAt.readyState +
         ', ' + injectedAt.scripts + ' skript före' + (lateInjection ? ' – SEN' : ' – tidig'))),
@@ -856,7 +1003,10 @@
       'SDK-lägen:      ' + (deviceModes || 'väntar…'),
       'Mus:            ' + mouseText(),
       'Mushändelser:   ' + (mouse.trace.length ? traceText() : '–'),
-      'Tangent:        ' + (mouse.lastKey || '–'),
+      'Tangent:        ' + (keyboard.last || mouse.lastKey || '–'),
+      'Tangentbord:    F1–F12 ' + keyboard.fkeys + ' · omap ' + keyboard.remapped +
+        ' · relås ' + keyboard.relocks + ' · ' + keyboard.registerNote +
+        (CONFIG.keyboard.remap ? ' · omap PÅ (gul)' : ' · omap AV (gul)'),
       'Handkontroller: ' + gamepadText(),
       'Spoof:          ' + (nav.userAgent === spoofUA ? 'aktiv – Windows/Chrome ' + major + ' (' + fullVersion + ')' : 'INTE aktiv') + ', UA-data ' + uaDataText(),
       'Riktig:         ' + trunc(realUA, 90) + ' · ' + (real ? real.platform + ', UA-data ' + trunc(real.uaData, 40) : ''),
@@ -964,18 +1114,74 @@
     installMouseListeners();
 
     window.addEventListener('keydown', function (e) {
-      mouse.lastKey = keyName(e);
+      keyboard.last = keyName(e);
+      mouse.lastKey = keyboard.last;
+      if (e.__gfnSynthetic) { return; }
+
       if (e.keyCode === CONFIG.keys.blue) {
         e.preventDefault(); e.stopImmediatePropagation();
         if (overlay.visible) { hideOverlay(); } else { showOverlay(0); }
-      } else if (e.keyCode === CONFIG.keys.red) {
+        return;
+      }
+      if (e.keyCode === CONFIG.keys.red) {
         e.preventDefault(); e.stopImmediatePropagation();
         toggleForce4k();
-      } else if (e.keyCode === CONFIG.keys.green) {
+        return;
+      }
+      if (e.keyCode === CONFIG.keys.green) {
         e.preventDefault(); e.stopImmediatePropagation();
         CONFIG.mouse.keepLock = !CONFIG.mouse.keepLock;
-        log('låsvakt ' + (CONFIG.mouse.keepLock ? 'PÅ' : 'AV (för jämförelse)'));
+        CONFIG.keyboard.relockOnInput = CONFIG.mouse.keepLock;
+        log('låsvakt ' + (CONFIG.mouse.keepLock ? 'PÅ (keepLock + relock)' : 'AV (för jämförelse)'));
         showOverlay(0);
+        return;
+      }
+      if (e.keyCode === CONFIG.keys.yellow) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        CONFIG.keyboard.remap = !CONFIG.keyboard.remap;
+        log('F-key omap ' + (CONFIG.keyboard.remap ? 'PÅ' : 'AV'));
+        showOverlay(0);
+        return;
+      }
+
+      // TV Back: keep focus in the app. The game still receives the key.
+      if (e.keyCode === 10009) {
+        e.preventDefault();
+        keyboard.pendingRelock = true;
+        log('Back (10009) fångad; fokus behålls');
+        return;
+      }
+
+      // Esc releases pointer lock at the browser level. Re-lock on the next input.
+      if (e.key === 'Escape' || e.keyCode === 27) {
+        keyboard.pendingRelock = true;
+        log('Esc: nästa tangent/click relåser');
+        return;
+      }
+
+      // If the TV routes F1–F12 to us, stop its hotkey default but let the game see it.
+      if (/^F([1-9]|1[0-2])$/.test(e.key || '')) {
+        keyboard.fkeys += 1;
+        if (CONFIG.keyboard.captureFKeys) { e.preventDefault(); }
+        if (keyboard.fkeys <= 5) { log('F-tangent: ' + keyboard.last); }
+        if (CONFIG.keyboard.relockOnInput && !document.pointerLockElement) { tryRelock('key'); }
+        return;
+      }
+
+      if (remapFKey(e)) {
+        if (CONFIG.keyboard.relockOnInput && !document.pointerLockElement) { tryRelock('key'); }
+        return;
+      }
+
+      if (CONFIG.keyboard.relockOnInput && !document.pointerLockElement) {
+        tryRelock('key');
+      }
+    }, true);
+
+    window.addEventListener('keyup', function (e) {
+      if (remapFKey(e)) { return; }
+      if (CONFIG.keyboard.captureFKeys && /^F([1-9]|1[0-2])$/.test(e.key || '')) {
+        e.preventDefault();
       }
     }, true);
   }
@@ -993,6 +1199,7 @@
   /* ================================================================= start */
 
   real = readRealIdentity();
+  registerFKeys();
   if (CONFIG.hideTizenGlobals) { hideGlobals(); }
   if (CONFIG.spoof) {
     applySpoof();
