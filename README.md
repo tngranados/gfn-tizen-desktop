@@ -40,10 +40,12 @@ on WebRTC H.265/AV1, hardware decode, ~45 Mbps and NVIDIA's browser entitlement.
 2. In TizenBrew open **Module Manager → Add Module → GitHub** and enter:
 
    ```
-   gh/tngranados/gfn-tizen-desktop@v0.3.2-gfn
+   tngranados/gfn-tizen-desktop@v0.3.2-gfn
    ```
 
-   Use the tag, not `@main`; jsDelivr may serve a cached copy of `main`.
+   TizenBrew's GitHub type prepends `gh/`; the full module ID becomes
+   `gh/tngranados/gfn-tizen-desktop@v0.3.2-gfn`. Use the tag, not `@main`;
+   jsDelivr may serve a cached copy of `main`.
 3. Launch **GFN Desktop** from the TizenBrew dashboard.
 
 Mouse support needs TizenBrew to be packaged with
