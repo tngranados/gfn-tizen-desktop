@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3-gfn
+
+- Add a configurable Escape proxy (`keyboard.escProxy`, default `CapsLock`).
+  Caps Lock / ScrollLock / Pause / ContextMenu sends a synthetic Escape without
+  a real Esc, so the browser does not release pointer lock.
+- Key-up safety timer (250 ms) so a consumed key-up cannot leave Escape stuck.
+- Panel shows the proxy key and how many synthetic Escapes were sent.
+
 ## 0.3.2-gfn
 
 Input fixes on top of Julianbjrk/gfn-tizen-desktop v0.3.1.

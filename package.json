@@ -1,8 +1,8 @@
 {
   "name": "gfn-tizen-desktop",
   "appName": "GFN Desktop",
-  "version": "0.3.2-gfn",
-  "description": "GeForce NOW web client on Samsung TV as a TizenBrew module: desktop identity, pointer-lock repair, 4K override, F-key remap and Esc re-lock.",
+  "version": "0.3.3-gfn",
+  "description": "GeForce NOW web client on Samsung TV as a TizenBrew module: desktop identity, pointer-lock repair, 4K override, F-key remap, Esc re-lock and a CapsLock→Esc proxy.",
   "packageType": "mods",
   "websiteURL": "https://play.geforcenow.com/robots.txt",
   "main": "inject.js",

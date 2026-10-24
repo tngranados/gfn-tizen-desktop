@@ -35,7 +35,7 @@
 
   /* ================================================================ config */
 
-  var VERSION = '0.3.2-gfn';
+  var VERSION = '0.3.3-gfn';
   var GFN_HOST = 'play.geforcenow.com';
   var GFN_APP_PATH = '/mall/';        // where GFN's index.html is served
   var BOOT_PATH = '/robots.txt';      // small text file on the GFN origin
@@ -63,11 +63,16 @@
       registerFKeys: true,   // ask Tizen to route F1–F12 to the app (the TV may ignore it)
       captureFKeys: true,    // preventDefault on F1–F12 so TV hotkeys do not fire
       remap: true,           // Ctrl/Alt + 1..0,-,= -> F1..F12 for games that need them
-      relockOnInput: true    // after Esc releases pointer lock, re-lock on the next key/click
+      relockOnInput: true,   // after Esc releases pointer lock, re-lock on the next key/click
+      escProxy: 'CapsLock'   // CapsLock, ScrollLock, Pause, ContextMenu, or '' to disable
     },
     unsupportedWatchMs: 90000,        // look for "not supported" on GFN pages this long
     overlay: { autoShowMs: 20000, maxLogLines: 60, shownLogLines: 10 }
   };
+
+  // Keys that can act as an Escape proxy. The proxy sends a synthetic Escape,
+  // so the browser never sees a real Esc and does not release pointer lock.
+  var ESC_PROXY_KEYS = { CapsLock: 20, ScrollLock: 145, Pause: 19, ContextMenu: 93 };
 
   // Globals that reveal Tizen (superset of what GFN's detector probes).
   var TIZEN_GLOBALS = ['tizen', 'webapis', 'b2bapis', 'TizenTVApiInfo', 'addEdgeEffectONSCROLLTizenUIF', 'tizentvwasm'];
@@ -106,7 +111,8 @@
   };
   var keyboard = {
     last: '', fkeys: 0, remapped: 0, relocks: 0,
-    registerNote: 'inte försökt', pendingRelock: false
+    registerNote: 'inte försökt', pendingRelock: false,
+    escProxyCount: 0, escProxyDown: false, escProxyTimer: null
   };
   var deviceModes = '';              // SDK's supported stream modes (for 4K diagnosis)
   var overlay = { el: null, visible: false, hideTimer: null, pollTimer: null };
@@ -781,15 +787,28 @@
   };
   var fkeyDown = {};  // digit -> F-key currently held, so keyup works after Ctrl is released
 
-  function dispatchFKey(name, type) {
-    var keyCode = 111 + Number(name.slice(1));
+  function dispatchKey(name, code, keyCode, type) {
     var event = new KeyboardEvent(type, {
-      key: name, code: name, bubbles: true, cancelable: true
+      key: name, code: code, bubbles: true, cancelable: true
     });
     try { Object.defineProperty(event, 'keyCode', { get: function () { return keyCode; } }); } catch (e) { /* ignore */ }
     try { Object.defineProperty(event, 'which', { get: function () { return keyCode; } }); } catch (e) { /* ignore */ }
     try { event.__gfnSynthetic = true; } catch (e) { /* ignore */ }
     (document.activeElement || document.body || document).dispatchEvent(event);
+  }
+
+  function dispatchFKey(name, type) {
+    dispatchKey(name, name, 111 + Number(name.slice(1)), type);
+  }
+
+  function dispatchEscape(type) {
+    dispatchKey('Escape', 'Escape', 27, type);
+  }
+
+  function isEscProxy(e) {
+    var proxy = CONFIG.keyboard.escProxy;
+    if (!proxy) { return false; }
+    return e.key === proxy || (ESC_PROXY_KEYS[proxy] && e.keyCode === ESC_PROXY_KEYS[proxy]);
   }
 
   function remapFKey(e) {
@@ -993,7 +1012,7 @@
     refreshStreamStats();
     var lines = [
       'GFN Desktop för Tizen v' + VERSION + '   [blå: visa/dölj · röd: 4K-läge · grön: låsvakt · gul: F-key omap]   klocka ' + tzLabel(),
-      'F-keys:         Ctrl/Alt + 1..0,-,= → F1..F12 · Esc → relås på nästa tangent/click',
+      'Keys:           Ctrl/Alt + 1..0,-,= → F1..F12 · Esc → relås · ' + (CONFIG.keyboard.escProxy || 'ingen') + ' → Escape',
       'Sida:           ' + location.host + trunc(location.pathname, 60),
       'Start:          ' + (startNote || ('direkt, injicerad ' + injectedAt.ms + ' ms, ' + injectedAt.readyState +
         ', ' + injectedAt.scripts + ' skript före' + (lateInjection ? ' – SEN' : ' – tidig'))),
@@ -1005,7 +1024,8 @@
       'Mushändelser:   ' + (mouse.trace.length ? traceText() : '–'),
       'Tangent:        ' + (keyboard.last || mouse.lastKey || '–'),
       'Tangentbord:    F1–F12 ' + keyboard.fkeys + ' · omap ' + keyboard.remapped +
-        ' · relås ' + keyboard.relocks + ' · ' + keyboard.registerNote +
+        ' · relås ' + keyboard.relocks + ' · esc-proxy ' + keyboard.escProxyCount +
+        ' (' + (CONFIG.keyboard.escProxy || 'av') + ') · ' + keyboard.registerNote +
         (CONFIG.keyboard.remap ? ' · omap PÅ (gul)' : ' · omap AV (gul)'),
       'Handkontroller: ' + gamepadText(),
       'Spoof:          ' + (nav.userAgent === spoofUA ? 'aktiv – Windows/Chrome ' + major + ' (' + fullVersion + ')' : 'INTE aktiv') + ', UA-data ' + uaDataText(),
@@ -1118,6 +1138,29 @@
       mouse.lastKey = keyboard.last;
       if (e.__gfnSynthetic) { return; }
 
+      // CapsLock (or ScrollLock/Pause/ContextMenu) acts as Escape without a real
+      // Esc, so the browser does not release pointer lock. The game still gets
+      // an Escape keydown/keyup.
+      if (isEscProxy(e)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        dispatchEscape('keydown');
+        keyboard.escProxyDown = true;
+        keyboard.escProxyCount += 1;
+        if (keyboard.escProxyTimer) { clearTimeout(keyboard.escProxyTimer); }
+        keyboard.escProxyTimer = setTimeout(function () {
+          if (keyboard.escProxyDown) {
+            keyboard.escProxyDown = false;
+            dispatchEscape('keyup');
+            log('Esc-proxy: keyup-säkerhet (' + CONFIG.keyboard.escProxy + ')');
+          }
+        }, 250);
+        if (keyboard.escProxyCount <= 5) {
+          log('Esc-proxy: ' + keyboard.last + ' -> Escape (pointer lock behålls)');
+        }
+        return;
+      }
+
       if (e.keyCode === CONFIG.keys.blue) {
         e.preventDefault(); e.stopImmediatePropagation();
         if (overlay.visible) { hideOverlay(); } else { showOverlay(0); }
@@ -1179,6 +1222,16 @@
     }, true);
 
     window.addEventListener('keyup', function (e) {
+      if (isEscProxy(e)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (keyboard.escProxyTimer) { clearTimeout(keyboard.escProxyTimer); keyboard.escProxyTimer = null; }
+        if (keyboard.escProxyDown) {
+          keyboard.escProxyDown = false;
+          dispatchEscape('keyup');
+        }
+        return;
+      }
       if (remapFKey(e)) { return; }
       if (CONFIG.keyboard.captureFKeys && /^F([1-9]|1[0-2])$/.test(e.key || '')) {
         e.preventDefault();

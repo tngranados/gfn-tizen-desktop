@@ -13,7 +13,7 @@ Unofficial and for personal use. Not affiliated with NVIDIA or Samsung. Changing
 how the browser identifies itself may conflict with the GeForce NOW terms of use.
 Use at your own risk.
 
-## Fork changes: v0.3.2-gfn
+## Fork changes: v0.3.3-gfn
 
 - **F keys.** Tries to register `F1`–`F12` / `KEY_F1`–`KEY_F12` with Tizen's
   input API. If an F key reaches the page, its TV hotkey default is cancelled
@@ -24,6 +24,8 @@ Use at your own risk.
 - **Esc recovery.** Esc is left alone so the game receives it. After the browser
   releases pointer lock, the next keypress or click in the video requests it
   again, so you should not need a separate click.
+- **CapsLock → Esc proxy.** CapsLock (or ScrollLock/Pause/ContextMenu) sends a
+  synthetic Escape, so the browser never sees a real Esc and pointer lock stays.
 - **TV Back.** `keyCode 10009` is cancelled and logged so the TV does not take
   focus, if the key is delivered to the page.
 - **Diagnostics.** The blue panel now shows the last key (`key`, `code`,
@@ -40,11 +42,11 @@ on WebRTC H.265/AV1, hardware decode, ~45 Mbps and NVIDIA's browser entitlement.
 2. In TizenBrew open **Module Manager → Add Module → GitHub** and enter:
 
    ```
-   tngranados/gfn-tizen-desktop@v0.3.2-gfn
+   tngranados/gfn-tizen-desktop@v0.3.3-gfn
    ```
 
    TizenBrew's GitHub type prepends `gh/`; the full module ID becomes
-   `gh/tngranados/gfn-tizen-desktop@v0.3.2-gfn`. Use the tag, not `@main`;
+   `gh/tngranados/gfn-tizen-desktop@v0.3.3-gfn`. Use the tag, not `@main`;
    jsDelivr may serve a cached copy of `main`.
 3. Launch **GFN Desktop** from the TizenBrew dashboard.
 
@@ -67,7 +69,7 @@ appear, patch TizenBrew's `config.xml` and reinstall it.
 Press **blue** and look at:
 
 ```
-Tangentbord:    F1–F12 0 · omap 3 · relås 2 · 0 ok / 24 fel · omap PÅ (gul)
+Tangentbord:    F1–F12 0 · omap 3 · relås 2 · esc-proxy 1 (CapsLock) · 0 ok / 24 fel · omap PÅ (gul)
 Tangent:        F1 code=F1 keyCode=112
 ```
 
@@ -79,7 +81,30 @@ Tangent:        F1 code=F1 keyCode=112
   remapping (QMK/VIA), a HID remapper dongle, or rebinding the action in-game.
 
 The panel is Swedish; `Tangentbord` is the keyboard line, `Tangent` is the last
-key, `relås` is re-lock.
+key, `relås` is re-lock, `esc-proxy` counts synthetic Escape keys.
+
+## Caps Lock as an Esc proxy
+
+Mapping Caps Lock to Esc in the keyboard firmware still sends a **real** Esc, so
+the browser still releases pointer lock. The module does it differently: it
+intercepts Caps Lock (or ScrollLock/Pause/ContextMenu), stops it from reaching
+the game as Caps Lock, and dispatches a **synthetic Escape**. The browser never
+sees a real Esc, so pointer lock stays; the game still gets Esc.
+
+Set `keyboard.escProxy` in `CONFIG`:
+
+| Value | Notes |
+| --- | --- |
+| `'CapsLock'` | default |
+| `'ScrollLock'` | use this if CapsLock toggles the TV's caps state |
+| `'Pause'` | another rarely-used key |
+| `'ContextMenu'` | the Menu key |
+| `''` | disable the proxy |
+
+The panel shows `esc-proxy N (CapsLock)`. If GFN ignores synthetic events
+(`isTrusted === false`), the proxy will not work; the real Esc still does. If the
+game itself calls `exitPointerLock()` on Escape, the lock may still release; the
+normal auto-relock takes over on the next input.
 
 ## Esc: what to expect
 
@@ -129,6 +154,7 @@ Edit the `CONFIG` object at the top of `inject.js`:
 | `keyboard.captureFKeys` | `true` | `preventDefault()` on F1–F12 so TV hotkeys do not fire |
 | `keyboard.remap` | `true` | `Ctrl/Alt + 1..0,-,=` → `F1..F12` |
 | `keyboard.relockOnInput` | `true` | Re-lock pointer lock on the next key/click after Esc |
+| `keyboard.escProxy` | `'CapsLock'` | CapsLock/ScrollLock/Pause/ContextMenu → synthetic Escape |
 | `force4k.preferred` | `['H265', 'AV1']` | Codec order for the 4K override |
 | `overlay.autoShowMs` | `20000` | Show the panel this long after page load (`0` = off) |
 
